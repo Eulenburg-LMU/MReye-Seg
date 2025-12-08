@@ -2,6 +2,7 @@
 # Copyright (c) 2018-2025 GeTang
 # Author: Ge Tang 
 
+#%%
 from __future__ import annotations
 import sys
 import os
@@ -99,8 +100,8 @@ def regAnts(ffFixed, ffMoving, output_prefix='output_',
             shrink_factors=[[4, 2], [4, 3, 2]],
             use_histogram_matching=[True, True],
             initial_geometric_Align=False,
-            verbose=False,
-            output_warped_image='output_warped_image.nii.gz'):
+            verbose=True,
+            output_warped_image = 'output_warped_image.nii.gz'):
     if ants is None:
         raise RuntimeError("nipype.interfaces.ants is required for registration (install nipype).")
     reg = ants.Registration()
@@ -189,19 +190,19 @@ def run_reg(ffFIX, ffMOV,
 
     which_sub = re.search(r'sub-(.+?)_ses', fnFIX)
     if which_sub:
-        sub_root = fnFIX
-        trfPrefix = pnOUT / f'trf-Temp_to_{which_sub.group(1)}'
+        sesnum = re.search(r'ses-(.+?)_', fnMOV)
+        trfPrefix = pnOUT / f'trf-Temp_to_sub-{which_sub.group(1)}_ses-{sesnum.group(1) if sesnum else "unknown"}'
     else:
         # fallback
-        sub_root = fnMOV
         m = re.search(r'sub-(.+?)_ses', fnMOV)
         subid = m.group(1) if m else 'unknown'
-        trfPrefix = pnOUT / f'trf-Temp_to_{subid}'
+        sesnum = re.search(r'ses-(.+?)_', fnMOV)
+        trfPrefix = pnOUT / f'trf-Temp_to_sub-{subid}_ses-{sesnum.group(1) if sesnum else "unknown"}'
 
     if ffAFF is None:
-        ffAFF = trfPrefix.with_suffix('.mat')
+        ffAFF = trfPrefix.with_name(trfPrefix.name + '_AFF.mat')
     if ffDEF is None:
-        ffDEF = trfPrefix.with_suffix('.nii.gz')
+        ffDEF = trfPrefix.with_name(trfPrefix.name + '_DEF.nii.gz')
     if ffAFFinv is None:
         ffAFFinv = trfPrefix.with_name(trfPrefix.name + '_AFFinv.mat')
     if ffDEFinv is None:
@@ -213,8 +214,8 @@ def run_reg(ffFIX, ffMOV,
                   output_prefix=str(output_prefix),
                   output_warped_image=str(output_warped_image),
                   transform_parameters=[(0.5,), (0.25, 3.0, 0.0)],
-                  smoothing_sigmas=[[2, 1], [4, 2, 1, 0]],
-                  shrink_factors=[[4, 2], [8, 4, 2, 1]],
+                  smoothing_sigmas = [[2,1], [4,2,1,0]],
+                  shrink_factors = [[4,2], [8,4,2,1]],
                   number_of_iterations=[[500, 250], [100, 70, 50, 40]],
                   composite_trf=True,
                   convergence_threshold=[1.e-7, 1.e-8],
@@ -232,6 +233,8 @@ def run_reg(ffFIX, ffMOV,
         try:
             outpfx = reg.inputs.output_transform_prefix
             ffoutAFF = outpfx + '0GenericAffine.mat'
+            ffoutDEF = outpfx + '1Warp.nii.gz'
+            ffDEFinv = outpfx + '1InverseWarp.nii.gz'
             # move files if necessary, but be conservative:
             if Path(ffoutAFF).exists():
                 shutil.move(ffoutAFF, str(ffAFF))
@@ -239,6 +242,10 @@ def run_reg(ffFIX, ffMOV,
                     trf = sitk.ReadTransform(str(ffAFF))
                     trfinv = trf.GetInverse()
                     sitk.WriteTransform(trfinv, str(ffAFFinv))
+            if Path(ffoutDEF).exists():
+                shutil.move(ffoutDEF, str(ffDEF))
+            if Path(ffDEFinv).exists():
+                shutil.move(ffDEFinv, str(ffDEFinv))
         except Exception as e:
             log.warning("Post-processing registration results failed: %s", e)
 
@@ -261,7 +268,7 @@ def main(argv=None):
         log.error("Template not found: %s", template)
         return 2
 
-    files = list(args.input_dir.rglob("Denoised*.nii*"))
+    files = list(args.input_dir.rglob("Denoised*T1w.nii*"))
     if not files:
         log.warning("No files found in %s matching pattern", args.input_dir)
         return 0
