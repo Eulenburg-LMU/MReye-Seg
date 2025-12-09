@@ -276,7 +276,7 @@ def main(argv=None):
     for i, ff in enumerate(files):
         log.info("Processing %d/%d: %s", i + 1, len(files), ff.name)
         subject_dir = ff.parent
-        proj_path = (args.output_root.resolve() if args.output_root else subject_dir / "SANS")
+        proj_path = (args.output_root.resolve() if args.output_root else subject_dir / "MReye")
         proj_path.mkdir(parents=True, exist_ok=True)
         prefixOUT = str(proj_path / "out_")
         ffOUT = proj_path / "out_volATLDeformed.nii.gz"
