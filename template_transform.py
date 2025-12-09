@@ -190,7 +190,7 @@ def run_reg(ffFIX, ffMOV,
 
     which_sub = re.search(r'sub-(.+?)_ses', fnFIX)
     if which_sub:
-        sesnum = re.search(r'ses-(.+?)_', fnMOV)
+        sesnum = re.search(r'ses-(.+?)_', fnFIX)
         trfPrefix = pnOUT / f'trf-Temp_to_sub-{which_sub.group(1)}_ses-{sesnum.group(1) if sesnum else "unknown"}'
     else:
         # fallback
@@ -234,7 +234,7 @@ def run_reg(ffFIX, ffMOV,
             outpfx = reg.inputs.output_transform_prefix
             ffoutAFF = outpfx + '0GenericAffine.mat'
             ffoutDEF = outpfx + '1Warp.nii.gz'
-            ffDEFinv = outpfx + '1InverseWarp.nii.gz'
+            ffoutDEFinv = outpfx + '1InverseWarp.nii.gz'
             # move files if necessary, but be conservative:
             if Path(ffoutAFF).exists():
                 shutil.move(ffoutAFF, str(ffAFF))
@@ -244,8 +244,8 @@ def run_reg(ffFIX, ffMOV,
                     sitk.WriteTransform(trfinv, str(ffAFFinv))
             if Path(ffoutDEF).exists():
                 shutil.move(ffoutDEF, str(ffDEF))
-            if Path(ffDEFinv).exists():
-                shutil.move(ffDEFinv, str(ffDEFinv))
+            if Path(ffoutDEFinv).exists():
+                shutil.move(ffoutDEFinv, str(ffDEFinv))
         except Exception as e:
             log.warning("Post-processing registration results failed: %s", e)
 
