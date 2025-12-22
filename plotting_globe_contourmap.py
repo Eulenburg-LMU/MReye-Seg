@@ -463,7 +463,7 @@ class GlobeShapePlottingPipeline:
         if self.config.condition == 'control':
             Z = np.mean(metrics_filtered, axis=2)
             cmap = cm.hot.reversed()
-        elif self.config.condition == 'variance':
+        elif self.config.condition != 'control':
             Z = np.var(metrics_filtered, axis=2)
             cmap = cm.hot.reversed()
         else:
@@ -522,7 +522,7 @@ class GlobeShapePlottingPipeline:
         if self.config.condition == 'control':
             Z = np.mean(all_metrics, axis=2)
             cmap = cm.hot.reversed()
-        elif self.config.condition == 'variance':
+        elif self.config.condition != 'control':
             Z = np.var(all_metrics, axis=2)
             cmap = cm.hot.reversed()
         else:
@@ -578,7 +578,6 @@ Examples:
                         choices=["T1", "T2"],
                         help="MRI modality (default: T1)")
     parser.add_argument("--condition", type=str, default="control",
-                        choices=["control", "variance"],
                         help="Analysis condition (default: control)")
     parser.add_argument("--contour-level", type=int, default=200,
                         help="Number of contour levels (default: 200)")
