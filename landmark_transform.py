@@ -18,7 +18,7 @@ Author: GeTang
 #%%
 import os
 import sys
-sys.path.append(r'D:\users\getang\SANS\Slicertools')
+sys.path.append(r'D:\users\getang\MReye-Seg\Slicertools')
 import slicerutil_getang as su
 import re
 import json
@@ -74,7 +74,7 @@ class PipelineConfig:
     fids_pattern: str  # e.g., "fids_{cohort}.fcsv"
     segs_pattern: str  # e.g., "Seg_{cohort}.seg.nrrd"
     cohort: str  # e.g., "Astro02mm"
-    output_subdir: str = "SANS"  # subdirectory for outputs
+    output_subdir: str = "MReye-Seg"  # subdirectory for outputs
     save_visualization: bool = False
     demo_mode: bool = False
     verbose: bool = False
@@ -1058,7 +1058,7 @@ Examples:
   python landmark_transform.py \\
     --template-dir /data/templates \\
     --input-dir /data/subjects \\
-    --output-subdir SANS \\
+    --output-subdir MReye-Seg \\
     --cohort Astro02mm
 
   # Run in demo mode (single subject)
@@ -1082,8 +1082,8 @@ Examples:
                         help="Filename pattern for segmentations (default: Seg_{cohort}.seg.nrrd)")
     parser.add_argument("--cohort", type=str, required=True,
                         help="Cohort name (e.g., Astro02mm, Cosmo02mm)")
-    parser.add_argument("--output-subdir", type=str, default="SANS",
-                        help="Output subdirectory name (default: SANS)")
+    parser.add_argument("--output-subdir", type=str, default="MReye-Seg",
+                        help="Output subdirectory name (default: MReye-Seg)")
     parser.add_argument("--demo", action="store_true",
                         help="Run in demo mode (single subject, verbose)")
     parser.add_argument("--verbose", "-v", action="store_true",
