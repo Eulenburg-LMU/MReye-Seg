@@ -40,7 +40,7 @@ class FiducialMetricsConfig:
     cohort: str = 'IIH02mm_T1w'
     mri_pattern: str = 'Denoised_*_{modality}.nii'
     fids_pattern: str = 'fids_{cohort}*.fcsv'
-    output_subdir: str = 'SANS'
+    output_subdir: str = 'MReye-Seg'
     output_format: str = 'csv'  # 'csv' or 'xlsx'
     save_results: bool = False
     demo_mode: bool = False
@@ -400,8 +400,8 @@ class FiducialMetricsExtractionPipeline:
                 # Get the relative path from root to the anat directory
                 subject_session_anat = Path(row['ff']).relative_to(root_dir).parent
                 
-                # Construct sans_dir: root/derivatives/subject/session/anat/SANS
-                metrics_dir = root_dir / 'derivatives' / subject_session_anat / 'SANS'
+                # Construct output_dir: root/derivatives/subject/session/anat/MReye-Seg
+                metrics_dir = root_dir / 'derivatives' / subject_session_anat / 'MReye-Seg'
 
                 fids_pattern = self.config.fids_pattern.format(cohort=self.config.cohort)
                 fids_files = locate_files(fids_pattern, metrics_dir, level=0)
@@ -494,12 +494,12 @@ def main(argv: Optional[List[str]] = None):
 Examples:
   # Basic extraction
   python fiducial_metrics_extraction.py \\
-    --project-path /data/IIH \\
+    --project-path /data/MReye-Seg \\
     --modalities IIH02mm T1 IIH02mm T2
 
   # Custom output
   python fiducial_metrics_extraction.py \\
-    --project-path /data/IIH \\
+    --project-path /data/MReye-Seg \\
     --output-format xlsx \\
     --verbose
         """
@@ -511,8 +511,8 @@ Examples:
                         help="MRI filename pattern (default: Denoised_*_{modality}.nii)")
     parser.add_argument("--fids-pattern", type=str, default="fids_{cohort}_*.fcsv",
                         help="Fiducial filename pattern (default: fids_{cohort}_*.fcsv)")
-    parser.add_argument("--output-subdir", type=str, default="SANS",
-                        help="Output subdirectory name (default: SANS)")
+    parser.add_argument("--output-subdir", type=str, default="MReye-Seg",
+                        help="Output subdirectory name (default: MReye-Seg)")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "xlsx"],
                         help="Output format (default: csv)")
     parser.add_argument("--save-results", action="store_true",
