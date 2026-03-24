@@ -61,7 +61,7 @@ class GlobeShapeAnalysisConfig:
     fids_pattern: str  # e.g., "fids_{cohort}.fcsv"
     segs_pattern: str  # e.g., "Seg_{cohort}.seg.nrrd"
     mri_pattern: str  # e.g., "Denoised_*_T1w.nii"
-    project_path: Path = Path(r'D:\users\getang\SANS')
+    project_path: Path = Path(r'D:\users\getang\MReye-Seg')
     orthogonal_projection: bool = False
     scaling: int = 50  # Scaling for finding intersection of lines on eyeball plane
     degree_to_center: int = 90
@@ -287,7 +287,7 @@ class ProjectionAnalyzer:
             # Save results if configured
             if self.config.save_results:
                 projection_name = f'Orthogonal_projection_{eyeball_name}_{self.config.degree_to_center}_sub-{subject_id}_ses-{session_id}'
-                output_path = self.config.project_path / 'derivatives' / f'sub-{subject_id}' / f'ses-{session_id}' / 'anat' / 'SANS' / f'{projection_name}.pickle'
+                output_path = self.config.project_path / 'derivatives' / f'sub-{subject_id}' / f'ses-{session_id}' / 'anat' / 'MReye-Seg' / f'{projection_name}.pickle'
                 ensure_path(output_path.parent, is_dir=True)
                 self.su.save_pickle(rotated_info, str(output_path))
             
@@ -377,7 +377,7 @@ class ProjectionAnalyzer:
             # Save results if configured
             if self.config.save_results:
                 projection_name = f'Polar_projection_{eyeball_name}_{self.config.degree_to_center}_sub-{subject_id}_ses-{session_id}'
-                output_path = self.config.project_path / 'derivatives' / f'sub-{subject_id}' / f'ses-{session_id}' / 'anat' / 'SANS' / f'{projection_name}.vtp'
+                output_path = self.config.project_path / 'derivatives' / f'sub-{subject_id}' / f'ses-{session_id}' / 'anat' / 'MReye-Seg' / f'{projection_name}.vtp'
                 ensure_path(output_path.parent, is_dir=True)
                 self._save_vtk_points(cartesian_coord, str(output_path))
             
@@ -558,26 +558,26 @@ class GlobeShapeAnalysisPipeline:
     
     def _process_subject(self, mri_file: Path, subject_id: str, session_id: str) -> List[ProjectionResult]:
         """Process a single subject."""
-        # Get the root directory (e.g., D:/IIH)
+        # Get the root directory (e.g., D:/MReye-Seg)
         root_dir = mri_file.parents[3]  # Adjust index based on your structure
         
         # Get the relative path from root to the anat directory
         subject_session_anat = mri_file.relative_to(root_dir).parent
         
-        # Construct sans_dir: root/derivatives/subject/session/anat/SANS
-        sans_dir = root_dir / 'derivatives' / subject_session_anat / 'SANS'
+        # Construct output_dir: root/derivatives/subject/session/anat/MReye-Seg
+        output_dir = root_dir / 'derivatives' / subject_session_anat / 'MReye-Seg'
         results = []
         
         try:
             # Load fiducials
-            fid_files = locate_files(self.config.fids_pattern.format(cohort=self.config.cohort), sans_dir, level=0)
+            fid_files = locate_files(self.config.fids_pattern.format(cohort=self.config.cohort), output_dir, level=0)
             if len(fid_files) != 1:
                 raise ValueError(f"Expected 1 fiducial file, found {len(fid_files)}: {fid_files}")
             nFIDS = loadMarkupsFiducialList(str(fid_files[0]), returnNode=True)
             nFIDS.SetName(f'fids_{self.config.cohort}')
             
             # Load segmentations
-            seg_files = locate_files(self.config.segs_pattern.format(cohort=self.config.cohort), sans_dir, level=0)
+            seg_files = locate_files(self.config.segs_pattern.format(cohort=self.config.cohort), output_dir, level=0)
             if len(seg_files) != 1:
                 raise ValueError(f"Expected 1 segmentation file, found {len(seg_files)}: {seg_files}")
             
@@ -638,18 +638,18 @@ def main(argv: Optional[List[str]] = None):
         epilog="""
 Examples:
   # Process with default settings
-  python Globe_contourmap.py --project-path /data/SANS
+  python Globe_contourmap.py --project-path /data/MReye-Seg
 
   # Run orthogonal projection with custom parameters
   python Globe_contourmap.py \\
-    --project-path /data/SANS \\
+    --project-path /data/MReye-Seg \\
     --orthogonal-projection \\
     --scaling 100 \\
     --degree-to-center 120 \\
     --save-results
 
   # Run in demo mode (single subject, verbose)
-  python Globe_contourmap.py --project-path /data/SANS --demo
+  python Globe_contourmap.py --project-path /data/MReye-Seg --demo
         """
     )
     parser.add_argument("--cohort", type=str, required=True,

@@ -60,7 +60,7 @@ except ImportError:
 @dataclass
 class GlobeShapePlottingConfig:
     """Configuration for globe shape analysis plotting."""
-    project_path: Path = Path(r'/Users/getang/Documents/EarthResearch/IIH')
+    project_path: Path = Path(r'/Users/getang/Documents/SpaceResearch/MReye-Seg')
     save_data: bool = False
     plotting: bool = True
     projection_map: str = 'Polar'  # 'Polar' or 'Orthogonal'
@@ -548,13 +548,13 @@ def main(argv: Optional[List[str]] = None):
 Examples:
   # Plot control data for left eye
   python plotting_globe_shape_analysis.py \\
-    --project-path /data/IIH \\
+    --project-path /data/MReye-Seg \\
     --side-of-eye L \\
     --condition control
 
   # Save data and plot variance for both eyes
   python plotting_globe_shape_analysis.py \\
-    --project-path /data/IIH \\
+    --project-path /data/MReye-Seg \\
     --save-data \\
     --side-of-eye L R \\
     --condition variance \\
