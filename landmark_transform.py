@@ -18,7 +18,6 @@ Author: GeTang
 #%%
 import os
 import sys
-sys.path.append(r'D:\users\getang\MReye-Seg\Slicertools')
 import slicerutil_getang as su
 import re
 import json
@@ -67,14 +66,14 @@ class RegionConfig:
 class PipelineConfig:
     """Main pipeline configuration."""
     template_dir: Path
-    template_pattern: str  # e.g., "T_{cohort}T1.nii.gz"
+    template_pattern: str  # e.g., "T_{cohort}.nii.gz"
     input_dir: Path
     input_pattern: str  # e.g., "Denoised_*_T1w.nii"
     fids_dir: Path
     fids_pattern: str  # e.g., "fids_{cohort}.fcsv"
     segs_pattern: str  # e.g., "Seg_{cohort}.seg.nrrd"
     cohort: str  # e.g., "Astro02mm"
-    output_subdir: str = "MReye-Seg"  # subdirectory for outputs
+    output_subdir: str = "MReye"  # subdirectory for outputs
     save_visualization: bool = False
     demo_mode: bool = False
     verbose: bool = False
@@ -88,6 +87,12 @@ class CenterlineMetrics:
     curvature: float = 0.0
     torsion: float = 0.0
     tortuosity: float = 0.0
+    startpoint_x: float = 0.0
+    startpoint_y: float = 0.0
+    startpoint_z: float = 0.0
+    endpoint_x: float = 0.0
+    endpoint_y: float = 0.0
+    endpoint_z: float = 0.0
 
     def to_dict(self) -> Dict[str, float]:
         """Convert to dictionary with region-prefixed keys."""
@@ -97,6 +102,12 @@ class CenterlineMetrics:
             f'{self.region}_curvature': self.curvature,
             f'{self.region}_torsion': self.torsion,
             f'{self.region}_tortuosity': self.tortuosity,
+            f'{self.region}_startpoint_x': self.startpoint_x,
+            f'{self.region}_startpoint_y': self.startpoint_y,
+            f'{self.region}_startpoint_z': self.startpoint_z,
+            f'{self.region}_endpoint_x': self.endpoint_x,
+            f'{self.region}_endpoint_y': self.endpoint_y,
+            f'{self.region}_endpoint_z': self.endpoint_z,
         }
 
 @dataclass
@@ -197,6 +208,12 @@ class CenterlineExtractor:
             raduis = metrics.GetTable().GetColumnByName('Radius').GetValue(0)
             torsion = metrics.GetTable().GetColumnByName('Torsion').GetValue(0)
             tortuosity = metrics.GetTable().GetColumnByName('Tortuosity').GetValue(0)
+            startpoint_x = metrics.GetTable().GetColumnByName('StartPointPosition').GetValue(0)
+            startpoint_y = metrics.GetTable().GetColumnByName('StartPointPosition').GetValue(1)
+            startpoint_z = metrics.GetTable().GetColumnByName('StartPointPosition').GetValue(2)
+            endpoint_x = metrics.GetTable().GetColumnByName('EndPointPosition').GetValue(0)
+            endpoint_y = metrics.GetTable().GetColumnByName('EndPointPosition').GetValue(1)
+            endpoint_z = metrics.GetTable().GetColumnByName('EndPointPosition').GetValue(2)
 
             return CenterlineMetrics(
                 region=region_name,
@@ -205,6 +222,12 @@ class CenterlineExtractor:
                 curvature=curvature,
                 torsion=torsion,
                 tortuosity=tortuosity,
+                startpoint_x=startpoint_x,
+                startpoint_y=startpoint_y,
+                startpoint_z=startpoint_z,
+                endpoint_x=endpoint_x,
+                endpoint_y=endpoint_y,
+                endpoint_z=endpoint_z
             )
         except Exception as e:
             log.error(f"Error computing metrics: {e}")
@@ -703,12 +726,14 @@ class LandmarkTransformPipeline:
         slicerutil_module=None,
         extract_centerlines: bool = True,
         extract_sheath_diameter: bool = True,
+        extract_volume_metrics: bool = True,
         sheath_gaps: List[int] = None
     ):
         self.config = config
         self.su = slicerutil_module
         self.extract_centerlines = extract_centerlines
         self.extract_sheath_diameter = extract_sheath_diameter
+        self.extract_volume_metrics = extract_volume_metrics
         self.sheath_gaps = sheath_gaps or [3, 5]  # Default gaps in mm
         setup_logging(config.verbose)
     
@@ -834,26 +859,38 @@ class LandmarkTransformPipeline:
             
             log.info(f"Saved outputs to {pn_out}")
             
+            seg_node_name = 'Segs_{}'.format(self.config.cohort)
+            fid_node_name = 'fids_{}'.format(self.config.cohort)
+
             centerline_metrics_dict = {}
             diameter_metrics_dict = {}
-            
+            volume_metrics_dict = {}
+
             if self.extract_centerlines and self.centerline_extractor:
                 centerline_metrics_dict = self._extract_centerlines(
                     pn_out, subject_id, fnroot,
-                    'Segs_{}'.format(self.config.cohort),
-                    'fids_{}'.format(self.config.cohort),
+                    seg_node_name, fid_node_name,
                     'centerlinemetrics'
                 )
-            
+
             if self.extract_sheath_diameter and self.sheath_extractor:
                 diameter_metrics_dict = self._extract_sheath_diameter(
                     pn_out, subject_id, fnroot,
-                    'Segs_{}'.format(self.config.cohort),
-                    'fids_{}'.format(self.config.cohort)
+                    seg_node_name, fid_node_name
                 )
-            
+
+            if self.extract_volume_metrics and n_segs:
+                volume_metrics_dict = self._extract_volume_metrics(
+                    pn_out, subject_id, fnroot,
+                    n_segs, n_t1
+                )
+
             # Merge and save all metrics
-            all_metrics = {**centerline_metrics_dict, **diameter_metrics_dict}
+            all_metrics = {
+                **centerline_metrics_dict,
+                **diameter_metrics_dict,
+                **volume_metrics_dict,
+            }
             
             if all_metrics:
                 fn_metrics = f'AllMetrics_{subject_id}_{fnroot}.csv'
@@ -917,7 +954,7 @@ class LandmarkTransformPipeline:
                     )
                     found_count += 1
                     log.debug(f"  Added endpoint: {label}")
-            
+
             if found_count < 2:
                 log.warning(f"Only found {found_count} endpoints for {region_name}")
             
@@ -980,6 +1017,31 @@ class LandmarkTransformPipeline:
         
         return metrics_dict
     
+    def _extract_volume_metrics(
+        self,
+        output_dir: Path,
+        subject_id: str,
+        fnroot: str,
+        seg_node: Any,
+        volume_node: Any = None,
+    ) -> Dict[str, float]:
+        """Extract volume/shape metrics from segmentation using SegmentStatistics."""
+        log.info(f"Extracting volume metrics for {subject_id}")
+        try:
+            stats = self.su.segmentationGetsegmentstatistics(seg_node, volume_node)
+            metrics_dict = self.su.segmentationGetVolumemetric(stats)
+
+            # Save volume metrics to separate CSV
+            fn_csv = f'VolumeMetrics_{subject_id}_{fnroot}.csv'
+            ff_csv = output_dir / fn_csv
+            save_dict_to_csv(metrics_dict, ff_csv)
+            log.info(f"Saved volume metrics: {ff_csv}")
+
+            return metrics_dict
+        except Exception as e:
+            log.error(f"Failed volume metrics extraction for {subject_id}: {e}")
+            return {}
+
     def _extract_sheath_diameter(
         self,
         output_dir: Path,
@@ -1058,7 +1120,7 @@ Examples:
   python landmark_transform.py \\
     --template-dir /data/templates \\
     --input-dir /data/subjects \\
-    --output-subdir MReye-Seg \\
+    --output-subdir MReye \\
     --cohort Astro02mm
 
   # Run in demo mode (single subject)
@@ -1068,8 +1130,8 @@ Examples:
     
     parser.add_argument("--template-dir", type=Path, required=True,
                         help="Directory containing template volumes")
-    parser.add_argument("--template-pattern", type=str, default="T_{cohort}T1.nii.gz",
-                        help="Filename pattern for templates (default: T_{cohort}T1.nii.gz)")
+    parser.add_argument("--template-pattern", type=str, default="T_{cohort}.nii.gz",
+                        help="Filename pattern for templates (default: T_{cohort}.nii.gz)")
     parser.add_argument("--input-dir", type=Path, required=True,
                         help="Root directory containing subject MRI files")
     parser.add_argument("--input-pattern", type=str, default="Denoised_*_T1w.nii",
@@ -1082,8 +1144,8 @@ Examples:
                         help="Filename pattern for segmentations (default: Seg_{cohort}.seg.nrrd)")
     parser.add_argument("--cohort", type=str, required=True,
                         help="Cohort name (e.g., Astro02mm, Cosmo02mm)")
-    parser.add_argument("--output-subdir", type=str, default="MReye-Seg",
-                        help="Output subdirectory name (default: MReye-Seg)")
+    parser.add_argument("--output-subdir", type=str, default="MReye",
+                        help="Output subdirectory name (default: MReye)")
     parser.add_argument("--demo", action="store_true",
                         help="Run in demo mode (single subject, verbose)")
     parser.add_argument("--verbose", "-v", action="store_true",
@@ -1114,10 +1176,11 @@ Examples:
     )
     
     try:
-        pipeline = LandmarkTransformPipeline(config, 
+        pipeline = LandmarkTransformPipeline(config,
                                              slicerutil_module=su,
                                              extract_centerlines=True,
                                              extract_sheath_diameter=True,
+                                             extract_volume_metrics=True,
                                              sheath_gaps=[3, 5]
                                              )
         pipeline.run()
