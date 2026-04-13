@@ -36,18 +36,18 @@ import re
 @dataclass
 class FiducialMetricsConfig:
     """Configuration for fiducial metrics extraction."""
-    project_path: Path = Path(r'/path/to/project')
+    project_path: Path = None  # Required: set via CLI --project-path
     cohort: str = 'IIH02mm_T1w'
     mri_pattern: str = 'Denoised_*_{modality}.nii'
     fids_pattern: str = 'fids_{cohort}*.fcsv'
-    output_subdir: str = 'MReye-Seg'
+    output_subdir: str = 'MReye'
     output_format: str = 'csv'  # 'csv' or 'xlsx'
     save_results: bool = False
     demo_mode: bool = False
     verbose: bool = False
     
     def __post_init__(self):
-        self.output_dir = self.project_path / 'derivatives' / 'Summary'
+        self.output_dir = self.project_path / 'Summary'
         self.modality = re.split(r'_', self.cohort)[1]
 # ============================================================================
 # Utility Functions
@@ -394,14 +394,14 @@ class FiducialMetricsExtractionPipeline:
             print(row)
             
             try:
-                # Construct fiducial file path
-                root_dir = Path(row['ff']).parents[3]
+                # Construct fiducial file path using project_path as root
+                root_dir = self.config.project_path
 
                 # Get the relative path from root to the anat directory
                 subject_session_anat = Path(row['ff']).relative_to(root_dir).parent
                 
-                # Construct output_dir: root/derivatives/subject/session/anat/MReye-Seg
-                metrics_dir = root_dir / 'derivatives' / subject_session_anat / 'MReye-Seg'
+                # Construct output_dir: root/subject/session/anat/{output_subdir}
+                metrics_dir = root_dir / subject_session_anat / self.config.output_subdir
 
                 fids_pattern = self.config.fids_pattern.format(cohort=self.config.cohort)
                 fids_files = locate_files(fids_pattern, metrics_dir, level=0)
@@ -511,8 +511,8 @@ Examples:
                         help="MRI filename pattern (default: Denoised_*_{modality}.nii)")
     parser.add_argument("--fids-pattern", type=str, default="fids_{cohort}_*.fcsv",
                         help="Fiducial filename pattern (default: fids_{cohort}_*.fcsv)")
-    parser.add_argument("--output-subdir", type=str, default="MReye-Seg",
-                        help="Output subdirectory name (default: MReye-Seg)")
+    parser.add_argument("--output-subdir", type=str, default="MReye",
+                        help="Output subdirectory name (default: MReye)")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "xlsx"],
                         help="Output format (default: csv)")
     parser.add_argument("--save-results", action="store_true",
