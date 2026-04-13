@@ -37,8 +37,8 @@ import re
 class FiducialMetricsConfig:
     """Configuration for fiducial metrics extraction."""
     project_path: Path = None  # Required: set via CLI --project-path
-    cohort: str = 'IIH02mm_T1w'
-    mri_pattern: str = 'Denoised_*_{modality}.nii'
+    cohort: str = 'IIH02mmT1'
+    mri_pattern: str = 'Denoised_*_{modality}*.nii'
     fids_pattern: str = 'fids_{cohort}*.fcsv'
     output_subdir: str = 'MReye'
     output_format: str = 'csv'  # 'csv' or 'xlsx'
@@ -48,7 +48,8 @@ class FiducialMetricsConfig:
     
     def __post_init__(self):
         self.output_dir = self.project_path / 'Summary'
-        self.modality = re.split(r'_', self.cohort)[1]
+        self.modality = re.search(r"T[12]", self.cohort).group()
+
 # ============================================================================
 # Utility Functions
 # ============================================================================
@@ -363,6 +364,7 @@ class FiducialMetricsExtractionPipeline:
             level=3, 
             sorted_=True
         )
+        print(f"Found {len(mri_files)} MRI files")
             
         for mri_file in mri_files:
             print(f"Found MRI file: {mri_file}")
@@ -402,7 +404,7 @@ class FiducialMetricsExtractionPipeline:
                 
                 # Construct output_dir: root/subject/session/anat/{output_subdir}
                 metrics_dir = root_dir / subject_session_anat / self.config.output_subdir
-
+                print(f"Looking for fiducials in: {metrics_dir}")
                 fids_pattern = self.config.fids_pattern.format(cohort=self.config.cohort)
                 fids_files = locate_files(fids_pattern, metrics_dir, level=0)
 
@@ -417,9 +419,9 @@ class FiducialMetricsExtractionPipeline:
                     df_fids = df_fids.set_index('label')
                     
                     # Extract measurements based on modality
-                    if self.config.modality == 'T1w':
+                    if self.config.modality == 'T1':
                         metrics = fid_measures_t1(df_fids)
-                    elif self.config.modality == 'T2w':
+                    elif self.config.modality == 'T2':
                         metrics = fid_measures_t2(df_fids)
                     else:
                         raise ValueError(f"Unknown modality: {row['modality']}")
@@ -507,8 +509,10 @@ Examples:
     
     parser.add_argument("--project-path", type=Path, required=True,
                         help="Project root directory")
-    parser.add_argument("--mri-pattern", type=str, default="Denoised_*_{modality}.nii",
-                        help="MRI filename pattern (default: Denoised_*_{modality}.nii)")
+    parser.add_argument("--cohort", type=str, default="IIH02mmT1",
+                        help="Cohort name (default: IIH02mmT1)")
+    parser.add_argument("--mri-pattern", type=str, default="Denoised_*_{modality}*.nii",
+                        help="MRI filename pattern (default: Denoised_*_{modality}*.nii)")
     parser.add_argument("--fids-pattern", type=str, default="fids_{cohort}_*.fcsv",
                         help="Fiducial filename pattern (default: fids_{cohort}_*.fcsv)")
     parser.add_argument("--output-subdir", type=str, default="MReye",
@@ -527,6 +531,7 @@ Examples:
     # Configurations
     config = FiducialMetricsConfig(
         project_path=args.project_path,
+        cohort=args.cohort,
         mri_pattern=args.mri_pattern,
         fids_pattern=args.fids_pattern,
         output_subdir=args.output_subdir,
