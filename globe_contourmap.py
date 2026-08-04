@@ -30,6 +30,7 @@ import numpy as np
 import math
 from math import sqrt, cos, sin, acos
 import random
+import slicerutil_getang as su
 
 # ============================================================================
 # Optional Slicer imports (graceful degradation if not in Slicer environment)
@@ -61,7 +62,8 @@ class GlobeShapeAnalysisConfig:
     fids_pattern: str  # e.g., "fids_{cohort}.fcsv"
     segs_pattern: str  # e.g., "Seg_{cohort}.seg.nrrd"
     mri_pattern: str  # e.g., "Denoised_*_T1w.nii"
-    project_path: Path = Path(r'D:\users\getang\MReye-Seg')
+    project_path: Path = None  # Required: set via CLI --project-path
+    output_subdir: str = "MReye"  # subdirectory for outputs
     orthogonal_projection: bool = False
     scaling: int = 50  # Scaling for finding intersection of lines on eyeball plane
     degree_to_center: int = 90
@@ -287,7 +289,7 @@ class ProjectionAnalyzer:
             # Save results if configured
             if self.config.save_results:
                 projection_name = f'Orthogonal_projection_{eyeball_name}_{self.config.degree_to_center}_sub-{subject_id}_ses-{session_id}'
-                output_path = self.config.project_path / 'derivatives' / f'sub-{subject_id}' / f'ses-{session_id}' / 'anat' / 'MReye-Seg' / f'{projection_name}.pickle'
+                output_path = self.config.project_path / 'derivatives' / f'sub-{subject_id}' / f'ses-{session_id}' / 'anat' / self.config.output_subdir / f'{projection_name}.pickle'
                 ensure_path(output_path.parent, is_dir=True)
                 self.su.save_pickle(rotated_info, str(output_path))
             
@@ -377,7 +379,7 @@ class ProjectionAnalyzer:
             # Save results if configured
             if self.config.save_results:
                 projection_name = f'Polar_projection_{eyeball_name}_{self.config.degree_to_center}_sub-{subject_id}_ses-{session_id}'
-                output_path = self.config.project_path / 'derivatives' / f'sub-{subject_id}' / f'ses-{session_id}' / 'anat' / 'MReye-Seg' / f'{projection_name}.vtp'
+                output_path = self.config.project_path / 'derivatives' / f'sub-{subject_id}' / f'ses-{session_id}' / 'anat' / self.config.output_subdir / f'{projection_name}.vtp'
                 ensure_path(output_path.parent, is_dir=True)
                 self._save_vtk_points(cartesian_coord, str(output_path))
             
@@ -558,14 +560,14 @@ class GlobeShapeAnalysisPipeline:
     
     def _process_subject(self, mri_file: Path, subject_id: str, session_id: str) -> List[ProjectionResult]:
         """Process a single subject."""
-        # Get the root directory (e.g., D:/MReye-Seg)
-        root_dir = mri_file.parents[3]  # Adjust index based on your structure
-        
+        # Get the root directory from project_path
+        root_dir = self.config.project_path
+
         # Get the relative path from root to the anat directory
         subject_session_anat = mri_file.relative_to(root_dir).parent
-        
-        # Construct output_dir: root/derivatives/subject/session/anat/MReye-Seg
-        output_dir = root_dir / 'derivatives' / subject_session_anat / 'MReye-Seg'
+
+        # Construct output_dir: root/derivatives/subject/session/anat/{output_subdir}
+        output_dir = root_dir / 'derivatives' / subject_session_anat / self.config.output_subdir
         results = []
         
         try:
@@ -662,6 +664,8 @@ Examples:
                         help="Filename pattern for MRI files (default: Denoised_*_T1w.nii)")
     parser.add_argument("--project-path", type=Path, required=True,
                         help="Project root directory containing data")
+    parser.add_argument("--output-subdir", type=str, default="MReye",
+                        help="Output subdirectory name (default: MReye)")
     parser.add_argument("--orthogonal-projection", action="store_true",
                         help="Use orthogonal projection instead of polar")
     parser.add_argument("--scaling", type=int, default=50,
@@ -690,6 +694,7 @@ Examples:
         segs_pattern=args.segs_pattern,
         mri_pattern=args.mri_pattern,
         project_path=args.project_path,
+        output_subdir=args.output_subdir,
         orthogonal_projection=args.orthogonal_projection,
         scaling=args.scaling,
         degree_to_center=args.degree_to_center,

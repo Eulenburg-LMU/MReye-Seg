@@ -268,15 +268,24 @@ def main(argv=None):
         log.error("Template not found: %s", template)
         return 2
 
-    files = list(args.input_dir.rglob("Denoised*T1w.nii*"))
+    # Derive modality (T1/T2) from the template filename (e.g. "T_IIH02mmT1.nii.gz" -> "T1")
+    mod_match = re.search(r'(T[12])(?=\.nii(?:\.gz)?$)', template.name)
+    if not mod_match:
+        log.error("Could not infer modality (T1/T2) from template name: %s", template.name)
+        return 2
+    modality = mod_match.group(1)
+
+    pattern = f"*{modality}w.nii*"
+    log.info("Searching subjects with pattern: %s", pattern)
+    files = list(args.input_dir.rglob(pattern))
     if not files:
-        log.warning("No files found in %s matching pattern", args.input_dir)
+        log.warning("No files found in %s matching pattern %s", args.input_dir, pattern)
         return 0
 
     for i, ff in enumerate(files):
         log.info("Processing %d/%d: %s", i + 1, len(files), ff.name)
         subject_dir = ff.parent
-        proj_path = (args.output_root.resolve() if args.output_root else subject_dir / "MReye")
+        proj_path = (args.output_root.resolve() if args.output_root else subject_dir / "MReye_wholebrain_T1w")
         proj_path.mkdir(parents=True, exist_ok=True)
         prefixOUT = str(proj_path / "out_")
         ffOUT = proj_path / "out_volATLDeformed.nii.gz"

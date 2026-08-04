@@ -60,7 +60,7 @@ except ImportError:
 @dataclass
 class GlobeShapePlottingConfig:
     """Configuration for globe shape analysis plotting."""
-    project_path: Path = Path(r'/Users/getang/Documents/SpaceResearch/MReye-Seg')
+    project_path: Path = None  # Required: set via CLI --project-path
     save_data: bool = False
     plotting: bool = True
     projection_map: str = 'Polar'  # 'Polar' or 'Orthogonal'
