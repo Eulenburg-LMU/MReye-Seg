@@ -31,9 +31,12 @@ from enum import Enum
 import pickle
 
 
+import numpy as np
+
 #%% Optional Slicer imports (graceful degradation if not in Slicer environment)
 try:
     import slicer
+    import vtk
     from slicer.util import loadVolume, loadMarkupsFiducialList, loadSegmentation, loadModel, saveNode
     IN_SLICER = True
 except ImportError:
@@ -77,6 +80,7 @@ class PipelineConfig:
     save_visualization: bool = False
     demo_mode: bool = False
     verbose: bool = False
+    keep_scene_open: bool = False  # if False, the scene is cleared after each image
 
 @dataclass
 class CenterlineMetrics:
@@ -123,6 +127,50 @@ class SheathCrossSectionAreaMetrics:
         prefix = f'{self.region}_{self.gap_mm}mm'
         suffix = '_interpolated' if self.interpolated else '_raw'
         return {f'{prefix}_area{suffix}': self.area_mm2}
+
+@dataclass
+class FeretDiameterMetrics:
+    """
+    Container for Feret diameter measurements on one cross-section plane.
+
+    The plane is placed *gap_mm* along the centerline from the nerve tip and
+    rotated to minimise the intersection area with the sheath (see
+    :class:`FeretDiameterExtractor`).
+    """
+    region: str
+    gap_mm: int = 3
+    maxferet_mm: float = 0.0
+    perpendicularferet_mm: float = 0.0
+    curve_area_mm2: float = 0.0
+    curve_length_mm: float = 0.0
+    valid_diameter: int = 1
+    percentage_valid_iterations: float = 0.0
+    maxferet_start: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    maxferet_end: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    perpendicularferet_start: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    perpendicularferet_end: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    def to_dict(self) -> Dict[str, float]:
+        """Convert to dictionary with region and gap-prefixed keys."""
+        prefix = f'{self.region}_{self.gap_mm}mm'
+        metrics = {
+            f'{prefix}_maxferetdiameter': self.maxferet_mm,
+            f'{prefix}_perpendicularferetdiameter': self.perpendicularferet_mm,
+            f'{prefix}_curveareamm2': self.curve_area_mm2,
+            f'{prefix}_curvelengthmm': self.curve_length_mm,
+            f'{prefix}_ifvaliddiameter': self.valid_diameter,
+            f'{prefix}_percentageofvaliditeration': self.percentage_valid_iterations,
+        }
+        points = {
+            ('maxferet', 'Start'): self.maxferet_start,
+            ('maxferet', 'End'): self.maxferet_end,
+            ('perpendicularferet', 'Start'): self.perpendicularferet_start,
+            ('perpendicularferet', 'End'): self.perpendicularferet_end,
+        }
+        for (which_feret, which_point), position in points.items():
+            for axis, value in zip(('R', 'A', 'S'), position):
+                metrics[f'{prefix}_{which_feret}_{which_point}PointPosition_{axis}'] = float(value)
+        return metrics
 
 # ============================================================================
 # Centerline Extraction (Slicer 5.6+ compatible)
@@ -497,6 +545,360 @@ class SheatDiameterExtractor:
             raise
 
 # ============================================================================
+# Feret Diameter Extraction (Slicer 5.6+ compatible)
+# ============================================================================
+
+class FeretDiameterExtractor:
+    """
+    Extract optic nerve sheath Feret diameters on an optimised cross-section plane.
+
+    For each region the plane is placed *gap* mm along the centerline from the
+    nerve tip. Because the centerline tangent is a noisy estimate of the true
+    sheath axis, the plane is then rotated within a cone around that tangent and
+    the orientation with the smallest intersection area is kept - the smallest
+    cut of a tube is its perpendicular cut.
+
+    Candidate planes are rejected when they intersect the ``*_diameterplane_check``
+    segment (the plane has run into the front of the sheath), when the cut is not
+    a single closed contour, or when the resulting area is implausibly small.
+    """
+
+    INVALID_AREA = 9999.0
+
+    def __init__(
+        self,
+        slicerutil_module=None,
+        n_iterations: int = 200,
+        search_range_deg: float = 30.0,
+        min_valid_area_mm2: float = 15.0,
+        fast_area_search: bool = True,
+        random_seed: Optional[int] = None,
+        resample_step_mm: float = 1.0,
+    ):
+        """
+        Args:
+            slicerutil_module: Reference to slicerutil (su) module
+            n_iterations: Number of candidate plane orientations to try
+            search_range_deg: Half-angle of the search cone around the centerline tangent
+            min_valid_area_mm2: Cross-sections smaller than this are treated as invalid
+            fast_area_search: Score candidates with a polygon area computed directly
+                from the cut outline instead of building a markups curve per
+                candidate. Same ranking, orders of magnitude faster.
+            random_seed: Seed for reproducible plane sampling
+            resample_step_mm: Control point spacing of the final closed curve
+        """
+        self.su = slicerutil_module
+        self.n_iterations = n_iterations
+        self.search_range = np.deg2rad(search_range_deg)
+        self.min_valid_area_mm2 = min_valid_area_mm2
+        self.fast_area_search = fast_area_search
+        self.resample_step_mm = resample_step_mm
+        self.rng = np.random.default_rng(random_seed)
+
+        if not IN_SLICER:
+            raise RuntimeError("FeretDiameterExtractor requires 3D Slicer environment.")
+        if not self.su:
+            raise RuntimeError("slicerutil module required for Feret diameter extraction")
+
+    # ------------------------------------------------------------------
+    # Plane search
+    # ------------------------------------------------------------------
+
+    def get_cutter_planes(
+        self,
+        centerline_model_name: str,
+        nerve_tip: List[float],
+        gap_mm: int,
+    ) -> Tuple[Any, Any]:
+        """
+        Generate candidate plane normals at *gap_mm* from the nerve tip.
+
+        Returns:
+            (planenormal_vectors, point) with shapes (N, 3) and (3,)
+        """
+        centerlinearray = self.su.modeltopointsarray(centerline_model_name)
+        dist_to_nervetip = np.atleast_1d(self.su.getDistance(centerlinearray, nerve_tip)) - gap_mm
+        point_idx = int(np.argmin(np.abs(dist_to_nervetip)))
+        log.debug(f"{centerline_model_name}: centerline point {point_idx} is "
+                  f"{dist_to_nervetip[point_idx] + gap_mm:.2f}mm from the nerve tip")
+
+        direction, point = self.su.diameterGetplane(centerline_model_name, point_idx)
+        planenormal_vectors = self.su.planeGetnormal(
+            direction, self.n_iterations, search_range=self.search_range, rng=self.rng
+        )
+        return planenormal_vectors, point
+
+    def _candidate_area(
+        self,
+        seg_node_name: str,
+        sheath_segment: str,
+        check_segment: Optional[str],
+        planenormal: Any,
+        point: Any,
+    ) -> float:
+        """
+        Intersection area of one candidate plane, or ``INVALID_AREA`` if rejected.
+        """
+        plane = self.su.getPlane(np.asarray(planenormal, dtype=float),
+                                 np.asarray(point, dtype=float))
+
+        # Reject planes that cut into the front of the sheath.
+        if check_segment:
+            check_outline = self.su.diameterGetoutlinePolyData(
+                seg_node_name, check_segment, plane)
+            if check_outline.GetNumberOfPoints() != 0:
+                return self.INVALID_AREA
+
+        outline = self.su.diameterGetoutlinePolyData(seg_node_name, sheath_segment, plane)
+        if outline.GetNumberOfLines() != 1:
+            # Zero lines = plane misses the sheath; more than one = the plane is
+            # so oblique it cuts the sheath in several places.
+            return self.INVALID_AREA
+
+        if self.fast_area_search:
+            area, _ = self.su.polygonAreaAndPerimeter(self.su.polylineFromPolyData(outline))
+            return area if area > 0 else self.INVALID_AREA
+
+        # Slow path: reproduce the original measurement exactly, via a markups curve.
+        outlinearray = np.array([outline.GetPoint(i) for i in range(outline.GetNumberOfPoints())])
+        if len(outlinearray) < 3:
+            return self.INVALID_AREA
+        closedCurveNode = self.su.getSortedcurvepoints(
+            outlinearray[0, :], outlinearray, 'CandidateDiametercurve')
+        try:
+            self.su.getResampledcurve(closedCurveNode.GetName(), self.resample_step_mm)
+            area, _ = self.su.getClosedsurfaceareaandlength(closedCurveNode.GetName())
+        finally:
+            slicer.mrmlScene.RemoveNode(closedCurveNode)
+        return area if area > 0 else self.INVALID_AREA
+
+    def get_optimal_plane(
+        self,
+        seg_node_name: str,
+        sheath_segment: str,
+        check_segment: Optional[str],
+        centerline_model_name: str,
+        nerve_tip: List[float],
+        gap_mm: int,
+    ) -> Tuple[Any, Any, float]:
+        """
+        Find the plane orientation with the smallest valid intersection area.
+
+        Returns:
+            (optimal_planenormal, point, percentage_of_valid_iterations)
+        """
+        planenormal_vectors, point = self.get_cutter_planes(
+            centerline_model_name, nerve_tip, gap_mm)
+
+        areas = np.array([
+            self._candidate_area(seg_node_name, sheath_segment, check_segment,
+                                 planenormal_vectors[i, :], point)
+            for i in range(len(planenormal_vectors))
+        ])
+
+        # Implausibly small cuts mean the plane clipped a corner of the surface.
+        areas[areas < self.min_valid_area_mm2] = self.INVALID_AREA
+        n_valid = int(np.sum(areas != self.INVALID_AREA))
+        percentage_valid = n_valid / len(areas)
+
+        if n_valid == 0:
+            log.warning(f"{sheath_segment} at {gap_mm}mm: no valid plane orientation found "
+                        f"in {len(areas)} candidates; falling back to the centerline normal")
+            return planenormal_vectors[0, :], point, 0.0
+
+        optimal_planenormal = planenormal_vectors[int(np.argmin(areas)), :]
+        log.info(f"{sheath_segment} at {gap_mm}mm: min area={np.min(areas):.2f}mm² "
+                 f"({n_valid}/{len(areas)} valid orientations)")
+        return optimal_planenormal, point, percentage_valid
+
+    # ------------------------------------------------------------------
+    # Measurement
+    # ------------------------------------------------------------------
+
+    def extract_feret_diameters(
+        self,
+        regions: List[Dict[str, str]],
+        centerline_model_prefix: str,
+        fiducial_node_name: str,
+        seg_node_name: str,
+        gaps_mm: List[int] = None,
+    ) -> Tuple[Dict[str, List[FeretDiameterMetrics]], Dict[str, Dict[int, Any]]]:
+        """
+        Measure Feret diameters for all regions at all gaps.
+
+        Args:
+            regions: [{'region': 'L_ON', 'segment': 'L_ONS', 'check': 'L_diameterplane_check'}, ...]
+            centerline_model_prefix: Suffix of the centerline model names (e.g. 'Centerlinemodel')
+            fiducial_node_name: Name of the fiducial list node holding the nerve tips
+            seg_node_name: Name of the segmentation node
+            gaps_mm: Distances from the nerve tip (default: [3])
+
+        Returns:
+            (metrics_by_region, nodes_by_region) where nodes_by_region maps
+            region -> gap -> (outlineModel, closedCurveNode, maxferetLine)
+        """
+        if gaps_mm is None:
+            gaps_mm = [3]
+
+        log.info(f"Extracting Feret diameters for {len(regions)} regions at gaps {gaps_mm}mm")
+
+        all_metrics: Dict[str, List[FeretDiameterMetrics]] = {}
+        all_nodes: Dict[str, Dict[int, Any]] = {}
+
+        for region_cfg in regions:
+            region_name = region_cfg['region']
+            side = re.search(r'^(.)', region_name)[0]
+            sheath_segment = region_cfg.get('segment', f'{region_name}S')
+            check_segment = region_cfg.get('check', f'{side}_diameterplane_check')
+            centerline_model_name = f'{region_name}_{centerline_model_prefix}'
+
+            if check_segment and not self.su.segmentationHasSegment(seg_node_name, check_segment):
+                log.info(f"Segment '{check_segment}' not in '{seg_node_name}'; "
+                         "skipping the diameter-plane validity check")
+                check_segment = None
+
+            region_metrics: List[FeretDiameterMetrics] = []
+            region_nodes: Dict[int, Any] = {}
+
+            nerve_tip = self.su.getFiducialPosition(fiducial_node_name, f'nerve_tip_{side}')
+
+            for gap_mm in gaps_mm:
+                try:
+                    metrics, nodes = self._measure_at_gap(
+                        seg_node_name, sheath_segment, check_segment,
+                        centerline_model_name, nerve_tip, region_name, gap_mm
+                    )
+                    region_metrics.append(metrics)
+                    region_nodes[gap_mm] = nodes
+                except Exception as e:
+                    log.error(f"Failed Feret diameter for {region_name} at {gap_mm}mm: {e}",
+                              exc_info=True)
+                    region_metrics.append(FeretDiameterMetrics(
+                        region=region_name, gap_mm=gap_mm, valid_diameter=0))
+
+            all_metrics[region_name] = region_metrics
+            all_nodes[region_name] = region_nodes
+
+        return all_metrics, all_nodes
+
+    def _measure_at_gap(
+        self,
+        seg_node_name: str,
+        sheath_segment: str,
+        check_segment: Optional[str],
+        centerline_model_name: str,
+        nerve_tip: List[float],
+        region_name: str,
+        gap_mm: int,
+    ) -> Tuple[FeretDiameterMetrics, Tuple[Any, Any, Any]]:
+        """Measure one region at one gap and return metrics plus the created nodes."""
+        optimal_planenormal, point, percentage_valid = self.get_optimal_plane(
+            seg_node_name, sheath_segment, check_segment,
+            centerline_model_name, nerve_tip, gap_mm
+        )
+
+        outlineModel, closedCurveNode, maxferetLine, perpendicularferetLine = \
+            self.su.getClosedCurveModel(
+                seg_node_name, sheath_segment, optimal_planenormal, point, gap=gap_mm,
+                namePrefix=region_name,
+                resample_step=self.resample_step_mm,
+            )
+
+        maxferet_points = self.su.markupsLineGetEndpoints(maxferetLine)
+        maxferet_mm = float(self.su.getDistance(maxferet_points[0], maxferet_points[1]))
+
+        if perpendicularferetLine is not None:
+            perp_points = self.su.markupsLineGetEndpoints(perpendicularferetLine)
+            perpendicularferet_mm = float(self.su.getDistance(perp_points[0], perp_points[1]))
+        else:
+            perp_points = np.full((2, 3), np.nan)
+            perpendicularferet_mm = float('nan')
+
+        curveareamm2, curvelengthmm = self.su.getClosedsurfaceareaandlength(
+            closedCurveNode.GetName())
+
+        # The chosen plane is valid only if it did not have to fall back.
+        valid_diameter = 1 if percentage_valid > 0 else 0
+
+        metrics = FeretDiameterMetrics(
+            region=region_name,
+            gap_mm=gap_mm,
+            maxferet_mm=maxferet_mm,
+            perpendicularferet_mm=perpendicularferet_mm,
+            curve_area_mm2=float(curveareamm2),
+            curve_length_mm=float(curvelengthmm),
+            valid_diameter=valid_diameter,
+            percentage_valid_iterations=percentage_valid,
+            maxferet_start=tuple(maxferet_points[0]),
+            maxferet_end=tuple(maxferet_points[1]),
+            perpendicularferet_start=tuple(perp_points[0]),
+            perpendicularferet_end=tuple(perp_points[1]),
+        )
+        log.info(f"{region_name} at {gap_mm}mm: maxferet={maxferet_mm:.2f}mm, "
+                 f"perpendicular={perpendicularferet_mm:.2f}mm, area={curveareamm2:.2f}mm²")
+        return metrics, (outlineModel, closedCurveNode, maxferetLine)
+
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
+
+    def save_diameter_nodes(
+        self,
+        nodes: Dict[str, Dict[int, Any]],
+        output_dir: Path,
+        subject_id: str,
+        fnroot: str,
+    ) -> None:
+        """Save the outline models and diameter curves for each region and gap."""
+        for region_name, gaps in nodes.items():
+            for gap_mm, node_tuple in gaps.items():
+                outlineModel, closedCurveNode, _ = node_tuple
+                try:
+                    name_model = f'{region_name}_{gap_mm}mm_Diametermodel'
+                    name_curve = f'{region_name}_{gap_mm}mm_Diametercurve'
+                    saveNode(outlineModel, str(output_dir / f'{name_model}_{subject_id}_{fnroot}.vtk'))
+                    saveNode(closedCurveNode,
+                             str(output_dir / f'{name_curve}_{subject_id}_{fnroot}.mrk.json'))
+                except Exception as e:
+                    log.error(f"Failed to save diameter nodes for {region_name} "
+                              f"at {gap_mm}mm: {e}")
+
+    def capture_diameter_views(
+        self,
+        nodes: Dict[str, Dict[int, Any]],
+        output_dir: Path,
+        subject_id: str,
+        fnroot: str,
+        scale_factor: float = 16.0,
+    ) -> None:
+        """
+        Capture the in-plane view of each measured cross-section, plus a
+        whole-head view centred on it.
+        """
+        for region_name, gaps in nodes.items():
+            for gap_mm, node_tuple in gaps.items():
+                _, _, maxferetLine = node_tuple
+                try:
+                    self.su.setLayout(8)  # Green slice only, showing the cut plane
+                    self.su.zoom2D(scale_factor, zoomRed=False, zoomYellow=False)
+                    self.su.captureImageFromAllViews(str(
+                        output_dir / f'img_{region_name}_{gap_mm}mm_perpendicularview_'
+                                     f'{subject_id}_{fnroot}.png'))
+                    self.su.zoom2D(1 / scale_factor, zoomRed=False, zoomYellow=False)
+
+                    endpoints = self.su.markupsLineGetEndpoints(maxferetLine)
+                    center = endpoints.mean(axis=0)
+                    self.su.setLayout(3)
+                    self.su.setSliceOffsetToFiducial(fidArray=center)
+                    self.su.captureImageFromAllViews(str(
+                        output_dir / f'img_{region_name}_{gap_mm}mm_perpendicularwholeview_'
+                                     f'{subject_id}_{fnroot}.png'))
+                except Exception as e:
+                    log.error(f"Failed to capture diameter view for {region_name} "
+                              f"at {gap_mm}mm: {e}")
+        self.su.setViewtoDefault('Green')
+
+# ============================================================================
 # Utility Functions
 # ============================================================================
 
@@ -527,6 +929,72 @@ def extract_session_id(filename: str, pattern: str = r'ses-(.+?)_') -> Optional[
     """Extract session ID from filename using regex pattern."""
     match = re.search(pattern, filename)
     return match.group(1) if match else None
+
+def extract_acq_id(filename: str, pattern: str = r'acq-(.+?)[_.]') -> Optional[str]:
+    """Extract acquisition ID from filename using regex pattern (None if absent)."""
+    match = re.search(pattern, filename)
+    return match.group(1) if match else None
+
+def build_entity_string(subject_id: str, ses_id: str, acq_id: Optional[str] = None) -> str:
+    """
+    Build the BIDS entity string used in derivative filenames.
+
+    Returns ``sub-<id>_ses-<id>`` , with ``_acq-<id>`` appended when the input
+    filename carries an acquisition entity:
+    ``sub-01_ses-20260507_acq-155445``
+    """
+    entities = f'sub-{subject_id}_ses-{ses_id}'
+    if acq_id:
+        entities += f'_acq-{acq_id}'
+    return entities
+
+def parse_gap_list(values: Any, default: Optional[List[int]] = None) -> List[int]:
+    """
+    Parse a list of gap distances in mm from user input.
+
+    Accepts any of these spellings, so the same value works from a shell,
+    from ``main([...])`` inside Slicer, and from Python::
+
+        parse_gap_list([3, 5, 7])          # native list
+        parse_gap_list(['3', '5', '7'])    # --feret-gaps 3 5 7
+        parse_gap_list('3,5,7')            # --feret-gaps 3,5,7
+        parse_gap_list('[3, 5, 7]')        # --feret-gaps "[3,5,7]"
+        parse_gap_list(5)                  # single value
+
+    Duplicates are dropped and the result is sorted ascending.
+
+    Raises:
+        ValueError: if a token is not a positive number.
+    """
+    if values is None or (isinstance(values, (list, tuple)) and not values):
+        return list(default) if default else []
+    if not isinstance(values, (list, tuple)):
+        values = [values]
+
+    tokens: List[str] = []
+    for value in values:
+        if isinstance(value, (int, float)):
+            tokens.append(str(value))
+        else:
+            # Strip bracket/quote decoration, then split on commas or whitespace
+            tokens.extend(re.split(r'[,\s]+', str(value).strip("[](){}'\" ")))
+
+    gaps: List[int] = []
+    for token in tokens:
+        if not token:
+            continue
+        try:
+            gap = int(float(token))
+        except ValueError:
+            raise ValueError(f"Invalid gap distance: {token!r} (expected a number in mm)")
+        if gap <= 0:
+            raise ValueError(f"Gap distance must be positive, got {gap}")
+        if gap not in gaps:
+            gaps.append(gap)
+
+    if not gaps:
+        return list(default) if default else []
+    return sorted(gaps)
 
 def splitext(fn: str) -> Tuple[str, str]:
     """Split filename, handling .nii.gz properly."""
@@ -727,25 +1195,44 @@ class LandmarkTransformPipeline:
         extract_centerlines: bool = True,
         extract_sheath_diameter: bool = True,
         extract_volume_metrics: bool = True,
-        sheath_gaps: List[int] = None
+        extract_feret_diameter: bool = True,
+        sheath_gaps: List[int] = None,
+        feret_gaps: List[int] = None,
+        feret_iterations: int = 200,
+        feret_random_seed: Optional[int] = None,
     ):
         self.config = config
         self.su = slicerutil_module
         self.extract_centerlines = extract_centerlines
         self.extract_sheath_diameter = extract_sheath_diameter
         self.extract_volume_metrics = extract_volume_metrics
-        self.sheath_gaps = sheath_gaps or [3, 5]  # Default gaps in mm
+        self.extract_feret_diameter = extract_feret_diameter
+        # Gaps accept [3, 5, 7], '3,5,7' or '[3,5,7]' - see parse_gap_list()
+        self.sheath_gaps = parse_gap_list(sheath_gaps, default=[3, 5])
+        self.feret_gaps = parse_gap_list(feret_gaps, default=[3])
+        self.centerline_extractor = None
+        self.sheath_extractor = None
+        self.feret_extractor = None
         setup_logging(config.verbose)
-    
+
         # Initialize extractors
         if IN_SLICER and self.su:
             if extract_centerlines:
                 self.centerline_extractor = CenterlineExtractor(self.su)
                 log.info("Initialized CenterlineExtractor")
-            
+
             if extract_sheath_diameter:
                 self.sheath_extractor = SheatDiameterExtractor(self.su)
                 log.info("Initialized SheatDiameterExtractor")
+
+            if extract_feret_diameter:
+                self.feret_extractor = FeretDiameterExtractor(
+                    self.su,
+                    n_iterations=feret_iterations,
+                    random_seed=feret_random_seed,
+                )
+                log.info(f"Initialized FeretDiameterExtractor (gaps: "
+                         f"{', '.join(f'{g}mm' for g in self.feret_gaps)})")
         self._validate_config()
 
     def _validate_config(self):
@@ -790,12 +1277,19 @@ class LandmarkTransformPipeline:
         fnroot, _ = splitext(mri_file.name)
         subject_id = extract_subject_id(mri_file.name)
         ses_id = extract_session_id(mri_file.name)
+        acq_id = extract_acq_id(mri_file.name)
         if not subject_id:
             log.warning(f"Could not extract subject ID from {mri_file.name}")
             return
         if not ses_id:
             log.warning(f"Could not extract session ID from {mri_file.name}")
             return
+        if not acq_id:
+            log.info(f"No acquisition entity in {mri_file.name}; "
+                     "filenames will be built without acq-")
+
+        # e.g. 'sub-01_ses-20260507_acq-155445'
+        entities = build_entity_string(subject_id, ses_id, acq_id)
 
         # Load template data
         template_file = self.config.template_dir / self.config.template_pattern.format(cohort=self.config.cohort)
@@ -820,9 +1314,10 @@ class LandmarkTransformPipeline:
                 log.warning(f"Segmentation not found: {segs_file}")
                 n_segs = None
             
-            # Load transforms (affine then deformable) 'trf-Temp_to_sub-02_ses-01_DEF'
-            fn_aff = f'trf-Temp_to_sub-{subject_id}_ses-{ses_id}_AFF.mat'
-            fn_def = f'trf-Temp_to_sub-{subject_id}_ses-{ses_id}_DEF.nii.gz'
+            # Load transforms (affine then deformable)
+            # e.g. 'trf-Temp_to_sub-01_ses-20260507_acq-155445_DEF.nii.gz'
+            fn_aff = f'trf-Temp_to_{entities}_AFF.mat'
+            fn_def = f'trf-Temp_to_{entities}_DEF.nii.gz'
             ff_aff = pn_out / fn_aff
             ff_def = pn_out / fn_def
             
@@ -847,8 +1342,8 @@ class LandmarkTransformPipeline:
                 n_segs.CreateClosedSurfaceRepresentation()
             
             # Save transformed data
-            fn_fids_out = f'fids_{self.config.cohort}_on_sub-{subject_id}_ses-{ses_id}.fcsv'
-            fn_segs_out = f'Segs_{self.config.cohort}_on_sub-{subject_id}_ses-{ses_id}.seg.nrrd'
+            fn_fids_out = f'fids_{self.config.cohort}_on_{entities}.fcsv'
+            fn_segs_out = f'Segs_{self.config.cohort}_on_{entities}.seg.nrrd'
             
             ff_fids_out = pn_out / fn_fids_out
             ff_segs_out = pn_out / fn_segs_out
@@ -864,6 +1359,7 @@ class LandmarkTransformPipeline:
 
             centerline_metrics_dict = {}
             diameter_metrics_dict = {}
+            feret_metrics_dict = {}
             volume_metrics_dict = {}
 
             if self.extract_centerlines and self.centerline_extractor:
@@ -879,6 +1375,13 @@ class LandmarkTransformPipeline:
                     seg_node_name, fid_node_name
                 )
 
+            # Feret diameters reuse the centerline models created above.
+            if self.extract_feret_diameter and self.feret_extractor:
+                feret_metrics_dict = self._extract_feret_diameter(
+                    pn_out, subject_id, fnroot,
+                    seg_node_name, fid_node_name
+                )
+
             if self.extract_volume_metrics and n_segs:
                 volume_metrics_dict = self._extract_volume_metrics(
                     pn_out, subject_id, fnroot,
@@ -889,6 +1392,7 @@ class LandmarkTransformPipeline:
             all_metrics = {
                 **centerline_metrics_dict,
                 **diameter_metrics_dict,
+                **feret_metrics_dict,
                 **volume_metrics_dict,
             }
             
@@ -896,12 +1400,19 @@ class LandmarkTransformPipeline:
                 fn_metrics = f'AllMetrics_{subject_id}_{fnroot}.csv'
                 ff_metrics = pn_out / fn_metrics
                 save_dict_to_csv(all_metrics, ff_metrics)
-            if not self.config.demo_mode:
-                SlicerHelper.close_scene()
-        
+
         except Exception as e:
             log.error(f"Error processing subject {subject_id}: {e}", exc_info=True)
             raise
+
+        finally:
+            # Always clear the scene, including after a failure: leftover nodes
+            # would otherwise be picked up by name when the next image loads.
+            if self.config.keep_scene_open:
+                log.info("Keeping the scene open (--keep-scene-open)")
+            else:
+                log.info(f"Closing the scene after {mri_file.name}")
+                SlicerHelper.close_scene()
 
     def _extract_endpoints_from_fiducials(
         self,
@@ -1102,7 +1613,52 @@ class LandmarkTransformPipeline:
                 fnroot=fnroot,
                 modality=modality
             )
-        
+
+        return metrics_dict
+
+    def _extract_feret_diameter(
+        self,
+        output_dir: Path,
+        subject_id: str,
+        fnroot: str,
+        seg_node_name: str,
+        fid_node_name: str,
+    ) -> Dict[str, float]:
+        """Extract Feret diameters of the sheath on optimised cross-section planes."""
+        log.info(f"Extracting Feret diameters for {subject_id}")
+
+        regions_for_feret = [
+            {'region': 'L_ON', 'segment': 'L_ONS', 'check': 'L_diameterplane_check'},
+            {'region': 'R_ON', 'segment': 'R_ONS', 'check': 'R_diameterplane_check'},
+        ]
+
+        all_metrics, all_nodes = self.feret_extractor.extract_feret_diameters(
+            regions=regions_for_feret,
+            centerline_model_prefix='Centerlinemodel',
+            fiducial_node_name=fid_node_name,
+            seg_node_name=seg_node_name,
+            gaps_mm=self.feret_gaps,
+        )
+
+        # Flatten metrics to dictionary
+        metrics_dict = {}
+        for region_metrics in all_metrics.values():
+            for metric in region_metrics:
+                metrics_dict.update(metric.to_dict())
+
+        # Save the outline models and diameter curves
+        self.feret_extractor.save_diameter_nodes(all_nodes, output_dir, subject_id, fnroot)
+
+        # Save Feret diameters to CSV
+        fn_csv = f'FeretdiameterMetrics_{subject_id}_{fnroot}.csv'
+        ff_csv = output_dir / fn_csv
+        save_dict_to_csv(metrics_dict, ff_csv)
+        log.info(f"Saved Feret diameters: {ff_csv}")
+
+        if self.config.save_visualization:
+            self.feret_extractor.capture_diameter_views(
+                all_nodes, output_dir, subject_id, fnroot)
+
         return metrics_dict
 
 # ============================================================================
@@ -1123,8 +1679,14 @@ Examples:
     --output-subdir MReye \\
     --cohort Astro02mm
 
+  # Measure Feret diameters at several distances from the nerve tip
+  python landmark_transform.py ... --feret-gaps 3 5 7
+
   # Run in demo mode (single subject)
   python landmark_transform.py ... --demo
+
+Note: the Slicer scene is cleared after every image; pass --keep-scene-open
+to inspect the result of the last one.
         """
     )
     
@@ -1152,14 +1714,37 @@ Examples:
                         help="Verbose logging")
     parser.add_argument("--save-visualization", action="store_true",
                         help="Save visualization screenshots")
-    
+    parser.add_argument("--keep-scene-open", action="store_true",
+                        help="Do not clear the Slicer scene after each image "
+                             "(default: the scene is closed after every image)")
+    parser.add_argument("--no-feret-diameter", action="store_true",
+                        help="Skip Feret diameter extraction")
+    parser.add_argument("--feret-gaps", type=str, nargs="+", default=["3"],
+                        help="Any number of distances from the nerve tip in mm for the "
+                             "Feret diameter planes, e.g. '3 5 7', '3,5,7' or '[3,5,7]' "
+                             "(default: 3)")
+    parser.add_argument("--sheath-gaps", type=str, nargs="+", default=["3", "5"],
+                        help="Any number of distances from the nerve tip in mm for the "
+                             "cross-section areas (default: 3 5)")
+    parser.add_argument("--feret-iterations", type=int, default=200,
+                        help="Candidate plane orientations to search per Feret "
+                             "measurement (default: 200)")
+    parser.add_argument("--feret-seed", type=int, default=None,
+                        help="Random seed for the Feret plane search (reproducible runs)")
+
     args = parser.parse_args(argv)
-    
+
+    try:
+        feret_gaps = parse_gap_list(args.feret_gaps, default=[3])
+        sheath_gaps = parse_gap_list(args.sheath_gaps, default=[3, 5])
+    except ValueError as e:
+        parser.error(str(e))
+
     if not IN_SLICER:
         print("ERROR: This script must be run in 3D Slicer's Python environment.")
         print("In Slicer, go to: Python Interactor → Execute script")
         return 1
-    
+
     config = PipelineConfig(
         template_dir=args.template_dir,
         template_pattern=args.template_pattern,
@@ -1173,6 +1758,7 @@ Examples:
         demo_mode=args.demo,
         verbose=args.verbose or args.demo,
         save_visualization=args.save_visualization,
+        keep_scene_open=args.keep_scene_open,
     )
     
     try:
@@ -1181,7 +1767,11 @@ Examples:
                                              extract_centerlines=True,
                                              extract_sheath_diameter=True,
                                              extract_volume_metrics=True,
-                                             sheath_gaps=[3, 5]
+                                             extract_feret_diameter=not args.no_feret_diameter,
+                                             sheath_gaps=sheath_gaps,
+                                             feret_gaps=feret_gaps,
+                                             feret_iterations=args.feret_iterations,
+                                             feret_random_seed=args.feret_seed,
                                              )
         pipeline.run()
         return 0
